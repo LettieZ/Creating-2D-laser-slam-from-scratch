@@ -18,12 +18,13 @@
 #include "tf2_geometry_msgs/tf2_geometry_msgs.h"
 
 ScanMatchPLICP::ScanMatchPLICP() : private_node_("~"), tf_listener_(tfBuffer_)
+//构造函数；private_node_ 初始化为 “~” ，代表私有命名空间，可用来获取节点内的参数,参数写在配置文件中
 {
     // \033[1;32m，\033[0m 终端显示成绿色
     ROS_INFO_STREAM("\033[1;32m----> PLICP odometry started.\033[0m");
 
     laser_scan_subscriber_ = node_handle_.subscribe(
-        "laser_scan", 1, &ScanMatchPLICP::ScanCallback, this);
+        "laser_scan", 1, &ScanMatchPLICP::ScanCallback, this); // "scan",  雷达数据的topic
 
     odom_publisher_ = node_handle_.advertise<nav_msgs::Odometry>("odom_plicp", 50);
 
@@ -37,6 +38,8 @@ ScanMatchPLICP::ScanMatchPLICP() : private_node_("~"), tf_listener_(tfBuffer_)
 
     base_in_odom_.setIdentity();
     base_in_odom_keyframe_.setIdentity();
+    //odom: 里程计坐标系，相对于map来说一般情况下是静止的，有些情况下会变动（定位节点为了修正机器人的位姿从而改变了map->odom间的坐标变换）
+    //base_link: 代表机器人的旋转中心的坐标系，相对于odom来说base_link是运动的
 
     input_.laser[0] = 0.0;
     input_.laser[1] = 0.0;
@@ -263,7 +266,7 @@ bool ScanMatchPLICP::GetBaseToLaserTf(const std::string &frame_id)
     try
     {
         transformStamped = tfBuffer_.lookupTransform(base_frame_, frame_id,
-                                                     t, ros::Duration(1.0));
+                                                     t, ros::Duration(1.0));//最长等待监听时间
     }
     catch (tf2::TransformException &ex)
     {
@@ -323,6 +326,7 @@ void ScanMatchPLICP::LaserScanToLDP(const sensor_msgs::LaserScan::ConstPtr &scan
 
 /**
  * 使用PLICP进行帧间位姿的计算
+ * 增加了 基于匀速模型的位姿预测，位姿累加，发布TF以及odom话题，新建关键帧
  */
 void ScanMatchPLICP::ScanMatchWithPLICP(LDP &curr_ldp_scan, const ros::Time &time)
 {
@@ -392,7 +396,7 @@ void ScanMatchPLICP::ScanMatchWithPLICP(LDP &curr_ldp_scan, const ros::Time &tim
 
     end_time_ = std::chrono::steady_clock::now();
     time_used_ = std::chrono::duration_cast<std::chrono::duration<double>>(end_time_ - start_time_);
-    // std::cout << "PLICP计算用时: " << time_used_.count() << " 秒。" << std::endl;
+    std::cout << "PLICP计算用时: " << time_used_.count() << " 秒。" << std::endl;
 
     tf2::Transform corr_ch;
 
@@ -404,6 +408,10 @@ void ScanMatchPLICP::ScanMatchWithPLICP(LDP &curr_ldp_scan, const ros::Time &tim
 
         // 将雷达坐标系下的坐标变换 转换成 base_link坐标系下的坐标变换
         corr_ch = base_to_laser_ * corr_ch_l * laser_to_base_;
+        // corr_ch_l 是激光雷达坐标系下，从当前帧雷达数据到关键帧间的变换矩阵
+        // 
+        // to is in,to is at --> AtoB,即A在B中的Pose
+        //由于tf箭头与to相反，因此此处base_to_laser_是激光雷达坐标系在机器人坐标系下的位姿，即从机器坐标系到雷达坐标系下的变换
 
         // 更新 base_link 在 odom 坐标系下 的坐标
         base_in_odom_ = base_in_odom_keyframe_ * corr_ch;
@@ -437,7 +445,7 @@ void ScanMatchPLICP::ScanMatchWithPLICP(LDP &curr_ldp_scan, const ros::Time &tim
 
 /**
  * 推测从上次icp的时间到当前时刻间的坐标变换
- * 使用匀速模型，根据当前的速度，乘以时间，得到推测出来的位移
+ * 使用匀速模型(假设机器人在2帧雷达数据间的运动是匀速的)，根据当前的速度，乘以时间，得到推测出来的位移
  */
 void ScanMatchPLICP::GetPrediction(double &prediction_change_x,
                                    double &prediction_change_y,
@@ -460,9 +468,9 @@ void ScanMatchPLICP::GetPrediction(double &prediction_change_x,
  */
 void ScanMatchPLICP::CreateTfFromXYTheta(double x, double y, double theta, tf2::Transform &t)
 {
-    t.setOrigin(tf2::Vector3(x, y, 0.0));
+    t.setOrigin(tf2::Vector3(x, y, 0.0));//为 tf2::Transform 赋值
     tf2::Quaternion q;
-    q.setRPY(0.0, 0.0, theta);
+    q.setRPY(0.0, 0.0, theta);  //2d无翻滚与俯仰，故此处为0，0，偏航角
     t.setRotation(q);
 }
 
@@ -492,7 +500,7 @@ void ScanMatchPLICP::PublishTFAndOdometry()
 }
 
 /**
- * 如果平移大于阈值，角度大于阈值，则创新新的关键帧
+ * 如果平移大于阈值，角度大于阈值，则创建新的关键帧
  * @return 需要创建关键帧返回true, 否则返回false
  */
 bool ScanMatchPLICP::NewKeyframeNeeded(const tf2::Transform &d)
